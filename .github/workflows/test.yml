@@ -1,0 +1,93 @@
+name: Test
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        perl: ['5.40', '5.32']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Perl ${{ matrix.perl }}
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+
+      - name: Install PostgreSQL (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql libpq-dev
+          sudo systemctl start postgresql
+          sudo -u postgres createuser -s "$USER"
+
+      - name: Install PostgreSQL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkgconf libpq postgresql@17
+          export PATH="$(brew --prefix postgresql@17)/bin:$PATH"
+          brew services start postgresql@17
+          sleep 3
+          createuser -s "$USER" || true
+
+      - name: Install deps
+        run: |
+          cpanm -n Alien::Build Alien::Base Test::Alien
+          cpanm -n Sort::Versions URI Mojo::DOM58
+
+      - name: Test system install type
+        env:
+          TEST_PG_CONNINFO: dbname=postgres
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export PKG_CONFIG_PATH="$(brew --prefix libpq)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          fi
+          perl Makefile.PL
+          make
+          make test
+
+      - name: Test share install type
+        env:
+          TEST_PG_CONNINFO: dbname=postgres
+          ALIEN_INSTALL_TYPE: share
+        run: |
+          make realclean
+          perl Makefile.PL
+          make
+          make test
+
+  test-freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y perl5 gmake pkgconf bison flex postgresql17-server postgresql17-client
+            pkg install -y p5-App-cpanminus p5-Alien-Build p5-Net-SSLeay p5-IO-Socket-SSL p5-Mozilla-CA
+            cpanm -n Test::Alien Sort::Versions URI Mojo::DOM58
+            sysrc postgresql_enable=YES
+            /usr/local/etc/rc.d/postgresql initdb
+            /usr/local/etc/rc.d/postgresql start
+            sleep 2
+            su -l postgres -c "createuser -s root"
+          run: |
+            perl Makefile.PL
+            gmake
+            TEST_PG_CONNINFO=dbname=postgres gmake test
+            gmake clean
+            ALIEN_INSTALL_TYPE=share perl Makefile.PL
+            gmake
+            TEST_PG_CONNINFO=dbname=postgres gmake test
