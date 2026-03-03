@@ -3,18 +3,40 @@ use alienfile;
 plugin 'PkgConfig' => 'libpq';
 
 share {
-    plugin 'Download' => (
-        url     => 'https://ftp.postgresql.org/pub/source/v18.3/',
-        filter  => qr/^postgresql-[0-9.]+\.tar\.bz2$/,
-        version => qr/^postgresql-([0-9.]+)\.tar\.bz2$/,
-    );
+    download sub {
+        my $build = shift;
+        require HTTP::Tiny;
+
+        my $http = HTTP::Tiny->new;
+        my $res  = $http->get('https://ftp.postgresql.org/pub/source/');
+        die "Failed to fetch source listing\n" unless $res->{success};
+
+        my @versions;
+        while ($res->{content} =~ /href="v(\d+)\.(\d+)\/"/g) {
+            push @versions, [ $1, $2 ];
+        }
+        @versions = sort { $b->[0] <=> $a->[0] || $b->[1] <=> $a->[1] } @versions;
+        die "No PostgreSQL versions found\n" unless @versions;
+
+        my $version  = "$versions[0][0].$versions[0][1]";
+        my $filename = "postgresql-$version.tar.bz2";
+        $build->log("Latest stable PostgreSQL: $version");
+
+        $res = $http->mirror(
+            "https://ftp.postgresql.org/pub/source/v$version/$filename",
+            $filename,
+        );
+        die "Failed to download $filename\n" unless $res->{success};
+
+        $build->runtime_prop->{version} = $version;
+    };
 
     plugin 'Extract' => 'tar.bz2';
 
     plugin 'Build::Autoconf';
 
     # PostgreSQL requires GNU make; on BSDs %{make} resolves to BSD make
-    my $make = ($^O =~ /bsd/i) ? 'gmake' : '%{make}';
+    my $make = ($^O =~ /bsd|dragonfly/i) ? 'gmake' : '%{make}';
 
     build [
         '%{configure} --prefix=%{.install.prefix} --without-readline --without-zlib --without-icu --without-openssl',
